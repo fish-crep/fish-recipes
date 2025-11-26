@@ -1,0 +1,172 @@
+---
+title: "Raw fish prep"
+author: "Andy Shantz"
+date: "2025-11-26"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+This code will produce analysis ready flat file for processing NCRMP Rapid Ecological Assessment fish data. Background on the National Coral Reef Monitoring Program (NCRMP) and survey methodology can be found at https://noaa-pifsc.github.io/esd-arp-resources/ .  
+
+There are several ways to access the raw data and required files. For github users, the easiest way to access the data is to clone the repository from github (https://github.com/fish-crep/fish-recipes). For non-github users, the code section below can be used to download the individual required files.
+
+Required packages
+```{r include = TRUE, warning=FALSE}
+require(tidyverse)
+require(readr)
+```
+
+Load required data files - if not cloning the repo this can be done using the following code.
+sm = master directory of all survey sites
+sectors = Naming convention for survey design and associated areas
+spp.list = List of all species with id codes and basic information. Note - this will produce warnings but they can be safely ignored.
+
+```{r include = TRUE}
+sm <- read_csv("https://raw.githubusercontent.com/fish-crep/fish-recipes/master/General%20Fish%20Processing/Required%20Data%20Files/SurveyMaster")
+sectors<-read.csv("https://raw.githubusercontent.com/fish-crep/fish-recipes/master/General%20Fish%20Processing/Required%20Data%20Files/Sector-Strata-Areas")
+spp.list<-read.csv("https://raw.githubusercontent.com/fish-crep/fish-recipes/master/General%20Fish%20Processing/Required%20Data%20Files/SpeciesList_vJul25", 
+                   header=T, na.strings=c("","NA")) %>%
+  mutate_at(vars(starts_with("LW_"), LMAX, LENGTH_CONVERSION_FACTOR, SLTLRAT, FLTLRAT), ~as.numeric(.)) 
+```
+
+The raw NCRMP fish survey data is too large to download in R. Instead, users can download the file directly from github by going to https://github.com/fish-crep/fish-recipes/blob/master/General%20Fish%20Processing/Required%20Data%20Files/REA_FishRaw_v2025.Rdata and selecting "download raw file". Alternatively, the file can be downloaded directly into the R environment from google drive using the code below
+```{r include = TRUE}
+require(googledrive)
+destfile <- "REA_FishRaw_v2025.Rdata"
+drive_download(as_id("https://drive.google.com/file/d/1BiuPw9iNAZo37KYNawix-JfRDJpujRiK/view?usp=drive_link"),
+               path = destfile, overwrite = T)
+load(destfile)
+```
+
+Once the raw data is loaded there are a number of cleaning steps needed to the general format with the most frequently used data.
+These steps are outlined in the code below
+```{r include = TRUE}
+x <- df %>% 
+  # Select required columns
+  select(c(11, 17, 12, 13,  6,  9, 10, 5, 7, 8, 68, 4, 71, 70, 67, 19, 16, 15, 14,
+           36, 20, 39, 50, 63, 64, 65, 55, 51, 52, 54, 53, 61, 59, 60, 62, 57, 58)) %>%
+  # Standardize site naming conventions 
+  mutate(across(all_of("SITE"), as.character)) %>%
+  separate(SITE, into = c("ISL", "NUM"), sep = "-", remove = FALSE) %>%
+  mutate(NUM.fixed = str_pad(NUM, width = 5, side = "left", pad = "0")) %>%  # str_pad handles shorter numbers
+  unite(SITE, ISL, NUM.fixed, sep = "-", remove = TRUE) %>%
+  select(-NUM) %>%
+  # Additional cleaning
+  mutate(
+    # change NAs->FALSE; none of the old data was 'training data'
+    TRAINING_YN = if_else(is.na(TRAINING_YN), 0, TRAINING_YN), 
+    # Fix REP that was not recorded and convert to factor     
+    REP = if_else(is.na(REP) & SITEVISITID == 11181, "A", REP), 
+    REP = factor(REP),
+    # Fix missing LAT/LON from Gua-01310. 
+    # This was assigned location but since we don't know where divers dropped don't want it to be permanent in Oracle Database
+    LATITUDE = ifelse(SITE=="GUA-01310", 13.24173, LATITUDE), 
+    LONGITUDE = ifelse(SITE=="GUA-01310", 144.70428, LONGITUDE),
+    # Fix trophic assignments and inconsistencies
+         TROPHIC_MONREP = case_when(
+           SPECIES == "TORA" ~ "SECONDARY",
+           TROPHIC %in% c("Pk") & TROPHIC_MONREP == "SECONDARY" ~ "PLANKTIVORE",
+           TRUE ~ TROPHIC_MONREP),
+    # Fix taxonnames for ZEVE
+    across(
+      c(TAXONNAME, SCIENTIFIC_NAME), ~ifelse(SPECIES == "ZEVE", "Zebrasoma velifer", .)),
+    # Turn NAs into "UNKNOWN" for consistentcy with older code
+  across(
+    c(HABITAT_CODE, SCIENTIFIC_NAME, COMMONNAME, FAMILY, COMMONFAMILYALL, TROPHIC_MONREP), 
+    ~ coalesce(., "UNKNOWN")),
+  # Turn any NAs in COUNT and SIZE into 0s
+  across(
+    c(COUNT, SIZE_), ~ coalesce(., 0,))) %>% 
+  # Remove data flagged as training or with an exclude flag 
+  filter(TRAINING_YN == 0 & EXCLUDE_FLAG == 0) 
+
+```
+
+OTHER CONSIDERATIONS  
+Visibility --> Current protocol is to not survey if viz is <7.5, however this has not always been the case. Earlier surveys didn't measure visibility and in some instances surveys were conducted as a better alternative than no data. However, these surveys may be undercount fish. 
+
+Some users may also want to seperate Guam and the Commonwealth of the Mariana Islands into two regions, as these areas are quite different. This can be done running the code below to separate the area into the Northern and Southern regions. Note, there are several islands or shoals (Anatahan,  Stingray Shoals,  Arakane,  Pathfinder Reef,  Santa Rosa Reef, and  Zealandia bank) that were only surveyed during single expeditions in 2003 and 2005 that are not included here.
+
+```{r}
+x1 <- x %>%
+  mutate(
+    REGION = case_when(
+      ISLAND %in% c("Guam", "Rota", "Aguijan", "Tinian", "Saipan") ~ "S.MARIAN",
+      ISLAND %in% c("Alamagan","Guguan","Sarigan","Pagan", "Agrihan", "Asuncion", "Maug", "Farallon de Pajaros") ~ "N.MARIAN",
+      TRUE ~ REGION),
+    REGION = factor(REGION)
+  ) %>%
+  droplevels()
+
+sectors <- sectors %>%
+  mutate(
+    REGION = case_when(
+      ISLAND %in% c("Guam", "Rota", "Aguijan", "Tinian", "Saipan") ~ "S.MARIAN",
+      ISLAND %in% c("Alamagan","Guguan","Sarigan","Pagan", "Agrihan", "Asuncion", "Maug", "Farallon de Pajaros") ~ "N.MARIAN",
+      TRUE ~ REGION),
+      REGION = factor(REGION)
+    ) %>%
+  droplevels()
+
+```
+
+Final considerations for filtering to the working dataset:
+NCRMP in the Pacific has gone through several evolutions that make comparisons between current and older data challenging. Originally, early surveys included both belt transects (METHOD = "BLT") Stationary Point Counts at fixed sites (METHOD "SPC").  Random Stationary Point Counts (METHOD = nSPC) were added in 2007 however no system existed at the tiem for trully selecting random sites so site selection for these surveys was haphazard rather than truly random.
+
+In 2010 a true stratified random sampling design was incorporated and divers began recording observations as either Instantaneous (OBS_TYPE = I) or non-instantaneous (OBS_TYPE = N). Divers also began conducting visual estiamtes of benthic cover at this time however there was no formal protocol or rigorous training for benthic estimates at this time. Benthic photoquads were also added to the standard survey protocol(?) --NEED TO DOUBLE CHECK IF THIS IS CORRECT--
+
+In 2012,  in an effort to record more large fishes and parrotfish, divers began recording new species that entered the survey area after the 5-minute "instantaneous" survey period had ended. Fishes that entered between 5-10 minutes were recorded as OBS_TYPE = F, and after ten-minute as OBS_TYPE "T". Rare species observed outside of the survey area were also recorded as OBS_TYPE = P.
+
+In 2014, a more detailed benthic assessment protocol was started that included diver trianing and calibration. Subsequent analyses found that diver estimates of benthic cover corellated very poorly with SFM and photoquad data, and these visual estimates were dropped from the SOP after 2023. In 2019 divers began collecting SFM imagery at some sites and in 2024 this became the sole datastream from nSPC benthic data. 
+
+Finally, in 2015 and 2017, nSPC surveys were conducted at a subset of sites using open-circuit SCUBA and CCR at the same site to test for differences.
+
+Because of these changes and inconsistencies, for most analyses we recommend filtering data to include only nSPC surveys (METHOD == "nSPC") conducted from 2010 onwards using consistent observation types (OBS_TYPE == c("U", "I", "N")).
+Before conducting other analyses we strongly recommend reaching out to the NCRMP team to discuss your needs and what data may be suitable for specific analyses.
+
+```{r}
+# Filter to working data from 2010 on - methods are consistent.
+wd.SPC <- full %>% filter(OBS_YEAR >= 2010 & METHOD %in% c("nSPC")) %>% 
+  mutate_at(vars(SPECIES, FAMILY, TAXONNAME), ~as.character(.)) %>%
+  # ONLY USE UIN OBS_TYPE
+  mutate_at(vars(SPECIES), ~ifelse(OBS_TYPE %in% c("U", "I", "N",), ., "NONFOCAL")) %>% 
+  # SPECIES NOT TO INCLUDE (NONFISH)
+  mutate_at(vars(SPECIES), ~ifelse(SPECIES %in% c("TURT", "MISS", "DOLP", "GRTU", "HKTU", "MENO", "MONK", "NONE", "NOSC", "STLO", "TUTR"), "NONFISH", .)) %>% # 
+  # FIX ANY MISSING LENGTH CONVERSIONS
+  mutate(LENGTH_CONVERSION_FACTOR = ifelse(is.na(LENGTH_CONVERSION_FACTOR), 1, LENGTH_CONVERSION_FACTOR)) %>%
+  
+  # OPTIONAL: Identify any sepcific focal species for analyses
+  #  mutate(
+            #across(c(SPECIES), ~if_else(SPECIES %in% c(), ., "NONFOCAL")) %>%
+  
+  ## CRYPTIC SPECIES --> INCONSISTENTLY SURVEYED AMONG DIVERS
+  left_join(spp.list %>% select(SPECIES, CRYPTIC) %>% mutate(CRYPTIC = ifelse(CRYPTIC == "Y", "Y", NA)), by = c("SPECIES")) %>% 
+  mutate(SPECIES = ifelse(!is.na(CRYPTIC), "CRYPTIC", SPECIES)) %>%  # CRYPTIC
+  
+  ##!! SIZE BINS --> UPDATE SIZE RANGE (seq function below)
+  #mutate(SIZE_10cm = cut(SIZE_, c(seq(0, 350, by = 10)), include.lowest = FALSE)) %>% #
+  
+  # CLEAN UP TAXA INFO
+  # FORM GENUS COLUMN
+  separate(TAXONNAME, c("GENUS", "X_SPECIES"), sep = " ", remove = FALSE) %>% 
+  select(-X_SPECIES) %>% 
+  # DEFINE GENERA THAT ARE FAMILIES
+  mutate(X_temp = "FAM") %>% unite("X_GEN", X_temp, GENUS, sep = "_", remove = FALSE) %>% 
+  mutate(GENUS = ifelse(GENUS == FAMILY, X_GEN, GENUS)) %>% select(-X_temp, -X_GEN) %>% 
+  mutate(GENUS = ifelse(GENUS %in% c("Un-id", "no"), TAXONNAME, GENUS)) %>%  
+  # DEFINE TROPHIC GROUPINGS
+  left_join(spp.list %>% distinct(TROPHIC, TROPHIC_DEF), by = c("TROPHIC")) %>% select(-TROPHIC) %>% 
+  dplyr::rename(TROPHIC = TROPHIC_DEF, TROPHIC_BROAD = TROPHIC_MONREP) %>% 
+  # FIX REMAINING GAPS IN GROUPINGS
+  mutate(FAMILY = ifelse(SPECIES == "FISH", "UNKNOWN", FAMILY)) %>%
+  mutate(FAMILY = ifelse(FAMILY == "UNKNOWN", "UNK_FAMILY", FAMILY)) %>%
+  
+  ## FINALIZE OBSERVATIONS TO MOVE FORWARD WITH
+  mutate(across(c(COUNT, SIZE_), ~ifelse(SPECIES %in% c("NONFISH", "CRYPTIC", "NONFOCAL"), 0, .))) %>% # NONFOCAL --> TURN COUNTS & SIZES TO 0
+  mutate(across(c(SPECIES, FAMILY, GENUS, TAXONNAME, TROPHIC, TROPHIC_BROAD),
+                ~ifelse(SPECIES %in% c("NONFISH", "CRYPTIC", "NONFOCAL"), "NONFOCAL", .))) 
+```
